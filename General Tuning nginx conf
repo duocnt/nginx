@@ -1,0 +1,115 @@
+General Tuning
+As with using nginx as a webserver the initial tuning step is to ensure that you have one worker per CPU-core on your system, and suitably high number of worker_connections.
+
+When nginx is working as a reverse proxy there will be two connections used up by every client:
+
+One for the incoming request from the client.
+One for the connection to the back-end.
+Assuming you have two CPU cores, which you can validate by running:
+
+$ grep ^proces /proc/cpuinfo | wc -l
+2
+Then this is a useful starting point:
+
+# One worker per CPU-core.
+worker_processes  2;
+
+events {
+    worker_connections  8096;
+    multi_accept        on;
+    use                 epoll;
+}
+
+worker_rlimit_nofile 40000;
+
+http {
+    sendfile           on;
+    tcp_nopush         on;
+    tcp_nodelay        on;
+    keepalive_timeout  15;
+
+}
+Standard Proxying
+The following is a basic template for an nginx reverse-proxy which passes on all requests to a given back-end.
+
+The net result is that rquests to http://your.ip:80/ will be redirected to the private server running on http://127.0.0.1:4433/:
+
+# One process for each CPU-Core
+worker_processes  2;
+
+# Event handler.
+events {
+    worker_connections  8096;
+    multi_accept        on;
+    use                 epoll;
+}
+
+http {
+
+     # Basic reverse proxy server
+     upstream backend  {
+           server 127.0.0.1:4433;
+     }
+
+     # *:80 -> 127.0.0.1:4433
+     server {
+            listen       80;
+            server_name  example.com;
+
+            ## send all traffic to the back-end
+            location / {
+                 proxy_pass        http://backend;
+                 proxy_redirect    off;
+                 proxy_set_header  X-Forwarded-For $remote_addr;
+            }
+     }
+}
+This template is a good starting point for a reverse-proxy, but we can certainly do better.
+
+Buffering Control
+When buffering is disabled, a response is passed to a client synchronously, as soon as it is received from the back-end.
+
+nginx will not try to read the whole response from the proxied server.
+
+The maximum size of the data that nginx can receive from the server at a time is set by the proxy_buffer_size directive.
+
+proxy_buffering    off;
+proxy_buffer_size  128k;
+proxy_buffers 100  128k;
+Caching & Expiration Control
+In the template above we saw that all requests were passed through to the back-end. To avoid overloading the back-end with static requests we can configure nginx to cache responses which are not going to change.
+
+This means that nginx won't even need to talk to the back-end for those requests.
+
+This next example causes *.html, *.gif, etc, to be cached for 30 minutes:
+
+http {
+     #
+     # The path we'll cache to.
+     #
+     proxy_cache_path /tmp/cache levels=1:2 keys_zone=cache:60m max_size=1G;
+}
+
+            ## send all traffic to the back-end
+            location / {
+
+                 proxy_pass  http://backend;
+                 proxy_redirect off;
+                 proxy_set_header        X-Forwarded-For $remote_addr;
+
+                 location ~* \.(html|css|jpg|gif|ico|js)$ {
+                        proxy_cache          cache;
+                        proxy_cache_key      $host$uri$is_args$args;
+                        proxy_cache_valid    200 301 302 30m;
+                        expires              30m;
+                        proxy_pass  http://backend;
+                 }
+            }
+NOTE: We added a line to the http section too.
+
+Here we cache requests to /tmp/cache, and we have defined a size-limit on that cache location of 1G. We've also configured the server to only cache valid responses, via:
+
+proxy_cache_valid  200 301 302 30m;
+Anything that doesn't response with a "HTTP (200|301|302) OK" is not cached.
+
+For an application, such as wordpress, we'd have to deal with cookies, and cache expiration, but by caching only static resources we're avoiding that issue here.
